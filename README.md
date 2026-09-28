@@ -57,6 +57,8 @@ Plex → rclone HTTP mount → Plugin HTTP server → 302 redirect → Dispatcha
 **🔁 Auto-sync with Radarr / Sonarr**
 - Nightly (or on demand) mirror of every movie and series from the VOD groups you enabled in Dispatcharr
 - Skips anything Radarr/Sonarr already have a file for; removes the VOD copy once they download it (per episode for series)
+- For a show Sonarr has files for, only fills episodes Sonarr itself lists but lacks; episode numbers Sonarr doesn't know (the provider numbers the show differently, e.g. TMDB parts vs TVDB seasons) are skipped, so they never show up as a second copy
+- Country/language tags in provider titles (`(NL) (2023)`, `(MULTI)`, `(NL AUDIO)`) are stripped from the names Plex sees
 - VOD folders can share your normal Plex libraries: removals only ever touch the VOD version of an item, `{tmdb-N}` hints make Plex merge instead of duplicate
 - Respects provider max streams across all account profiles, keeps streams free for viewers, pauses while people watch
 - Dry run, capped batches, retry cooldown, and a safety valve against mass removals
