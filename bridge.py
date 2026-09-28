@@ -7715,6 +7715,10 @@ class BridgeCore:
                     "tmdb": norm_tmdb(tmdb),
                     "imdb": norm_imdb(imdb),
                     "name": f"{name} ({year})" if year else name,
+                    # For the Sonarr title+year fallback (provider tags like
+                    # "NL - " / "(BE)" stripped the same way as for Plex).
+                    "title": self._clean_title(name),
+                    "year": year,
                     "added": created.timestamp() if created else 0,
                     "accounts": set(),
                 }
@@ -7728,8 +7732,11 @@ class BridgeCore:
         out = {}
         ids = [int(s) for s in series_ids if str(s).isdigit()]
         for chunk in self._chunks(ids):
-            for sid, tmdb, imdb in Series.objects.filter(id__in=chunk).values_list("id", "tmdb_id", "imdb_id"):
-                out[str(sid)] = {"tmdb": norm_tmdb(tmdb), "imdb": norm_imdb(imdb)}
+            for sid, tmdb, imdb, name, year in Series.objects.filter(id__in=chunk).values_list(
+                "id", "tmdb_id", "imdb_id", "name", "year"
+            ):
+                out[str(sid)] = {"tmdb": norm_tmdb(tmdb), "imdb": norm_imdb(imdb),
+                                 "title": self._clean_title(name), "year": year}
         return out
 
     def _best_series_relation(self, series_id, relations=None):

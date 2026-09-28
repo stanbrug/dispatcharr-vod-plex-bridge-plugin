@@ -98,6 +98,28 @@ class SonarrIndexTests(unittest.TestCase):
         self.assertEqual(idx.owned_episodes(2), set())
         self.assertEqual(client.calls, [])
 
+    def test_title_year_fallback(self):
+        series = [
+            {"id": 10, "title": "Expeditie Robinson (NL)", "year": 2000, "tmdbId": 0},
+            {"id": 11, "title": "The Office", "year": 2005, "tmdbId": 2996},
+            {"id": 12, "title": "ONE PIECE (2023)", "year": 2023, "tmdbId": 111110},
+            {"id": 13, "title": "Married at First Sight (NL)", "year": 2016, "tmdbId": 627},
+            {"id": 14, "title": "vtwonen weer verliefd op je huis", "year": 2019, "tmdbId": 0},
+            {"id": 15, "title": "Taboo (2017)", "year": 2017, "tmdbId": 0,
+             "alternateTitles": [{"title": "Taboo UK"}]},
+        ]
+        idx = SonarrIndex(FakeClient({}), series)
+        self.assertEqual(idx.find_series_id("8308", None, title="Expeditie Robinson", year=2000), 10)
+        self.assertEqual(idx.find_series_id(None, None, title="Expeditie Robinson (NL)", year=2001), 10)
+        self.assertIsNone(idx.find_series_id("256480", None, title="The Office (MULTI)", year=2024))
+        self.assertIsNone(idx.find_series_id("37854", None, title="One Piece", year=1999))
+        self.assertEqual(idx.find_series_id(None, None, title="Married At First Sight", year=None), 13)
+        self.assertEqual(idx.find_series_id("215154", None, title="vtwonen: weer verliefd op je huis", year=2019), 14)
+        self.assertEqual(idx.find_series_id(None, None, title="Taboo", year=2017), 15)
+        self.assertIsNone(idx.find_series_id(None, None, title="Something Else", year=2017))
+        # A real id match still wins over the title.
+        self.assertEqual(idx.find_series_id("2996", None, title="Other", year=1990), 11)
+
     def test_fetch_failure_raises(self):
         idx = SonarrIndex(FakeClient({}), [{"id": 7, "tmdbId": 1, "statistics": {"episodeFileCount": 3}}])
         with self.assertRaises(arr_sync.ArrError):

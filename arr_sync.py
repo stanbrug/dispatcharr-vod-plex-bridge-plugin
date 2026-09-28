@@ -119,12 +119,33 @@ class RadarrIndex:
         return bool((tmdb and tmdb in self.owned_tmdb) or (imdb and imdb in self.owned_imdb))
 
 
+_TRAILING_TAG_RE = re.compile(r"\s*\((?:\d{4}|[A-Za-z]{2,5}(?:\s?[A-Za-z]{2,4})?)\)\s*$")
+
+
+def norm_title(title):
+    """Comparable form of a show title: trailing "(2017)" / "(NL)" / "(MULTI)"
+    tags dropped, lowercase, letters and digits only ("&" == "and")."""
+    title = title or ""
+    while True:
+        stripped = _TRAILING_TAG_RE.sub("", title)
+        if stripped == title:
+            break
+        title = stripped
+    return re.sub(r"[^0-9a-z]", "", title.lower().replace("&", "and"))
+
+
 class SonarrIndex:
     """Which episodes Sonarr already provides.
 
     Series are matched on TMDB id first, then IMDb id (Dispatcharr stores no
-    TVDB id). Episode lists are only fetched for matched series that have at
-    least one file, and cached for the lifetime of this index (one sync run).
+    TVDB id), then -- because Sonarr often has no TMDB id for local/Dutch
+    shows (tmdbId 0) -- on title + year: same normalized title and a year at
+    most one apart, or, when either side lacks a year, a title that only one
+    Sonarr series has. Different shows sharing a title (The Office 2005 vs
+    2024, One Piece 1999 vs 2023) differ in year and stay apart.
+
+    Episode lists are only fetched for matched series that have at least one
+    file, and cached for the lifetime of this index (one sync run).
     """
 
     def __init__(self, client, series_list, count_missing_as_owned=False):
@@ -132,6 +153,7 @@ class SonarrIndex:
         self.count_missing_as_owned = count_missing_as_owned
         self._by_tmdb = {}
         self._by_imdb = {}
+        self._by_title = {}  # normalized title -> [(sonarr id, year)]
         self._series = {}
         self._episodes = {}
         self.total = 0
@@ -147,19 +169,39 @@ class SonarrIndex:
                 self._by_tmdb.setdefault(tmdb, sid)
             if imdb:
                 self._by_imdb.setdefault(imdb, sid)
+            titles = {s.get("title")} | {a.get("title") for a in s.get("alternateTitles") or []}
+            for t in titles:
+                key = norm_title(t)
+                if key:
+                    self._by_title.setdefault(key, [])
+                    if (sid, s.get("year")) not in self._by_title[key]:
+                        self._by_title[key].append((sid, s.get("year")))
 
     @classmethod
     def fetch(cls, client, count_missing_as_owned=False):
         return cls(client, client.get("series"), count_missing_as_owned=count_missing_as_owned)
 
-    def find_series_id(self, tmdb_id, imdb_id):
+    def find_series_id(self, tmdb_id, imdb_id, title=None, year=None):
         tmdb = norm_tmdb(tmdb_id)
         if tmdb and tmdb in self._by_tmdb:
             return self._by_tmdb[tmdb]
         imdb = norm_imdb(imdb_id)
         if imdb and imdb in self._by_imdb:
             return self._by_imdb[imdb]
-        return None
+        candidates = self._by_title.get(norm_title(title)) if title else None
+        if not candidates:
+            return None
+        try:
+            year = int(year) if year else None
+        except (TypeError, ValueError):
+            year = None
+        if year is not None:
+            close = [sid for sid, y in candidates if y and abs(int(y) - year) <= 1]
+            if len(close) == 1:
+                return close[0]
+            if close or all(y for _, y in candidates):
+                return None  # ambiguous, or only other years: a different show
+        return candidates[0][0] if len(candidates) == 1 else None
 
     def owned_episodes(self, sonarr_series_id):
         """{(season, episode)} Sonarr covers for this series. Raises ArrError
@@ -664,7 +706,8 @@ class AutoSync:
         def _sonarr_id(dispatcharr_sid):
             if dispatcharr_sid not in series_ids_for:
                 info = eligible_series.get(dispatcharr_sid) or self.bridge._series_ids_for([dispatcharr_sid]).get(dispatcharr_sid) or {}
-                series_ids_for[dispatcharr_sid] = sonarr.find_series_id(info.get("tmdb"), info.get("imdb"))
+                series_ids_for[dispatcharr_sid] = sonarr.find_series_id(
+                    info.get("tmdb"), info.get("imdb"), title=info.get("title"), year=info.get("year"))
             return series_ids_for[dispatcharr_sid]
 
         owned_cache = {}
