@@ -280,6 +280,35 @@ class PlexSafetyTests(unittest.TestCase):
         self.assertEqual(len(core._plex_vod_deletions(items, "movie", lambda it, f: True)), 1)
 
 
+class ScheduleTests(unittest.TestCase):
+    def make(self):
+        bridge_stub = type("B", (), {"settings": {"auto_sync_enabled": True, "auto_sync_time": "03:30"}})()
+        sync = arr_sync.AutoSync(bridge_stub)
+        sync.started = []
+        sync.enabled = lambda: True
+        sync.is_running = lambda: False
+        sync._save = lambda: None
+        sync.start = lambda dry_run, trigger: sync.started.append(trigger)
+        return sync
+
+    def at(self, hh, mm):
+        from datetime import datetime
+        return datetime(2026, 9, 28, hh, mm).timestamp()
+
+    def test_runs_once_in_the_window(self):
+        sync = self.make()
+        self.assertFalse(sync.maybe_run_scheduled(self.at(3, 0)))
+        self.assertTrue(sync.maybe_run_scheduled(self.at(3, 31)))
+        self.assertFalse(sync.maybe_run_scheduled(self.at(4, 0)))  # already ran today
+        self.assertEqual(sync.started, ["schedule"])
+
+    def test_enabling_in_the_afternoon_waits_for_the_night(self):
+        sync = self.make()
+        self.assertFalse(sync.maybe_run_scheduled(self.at(18, 45)))
+        self.assertEqual(sync.started, [])
+        self.assertIsNone(sync._state["last_run_date"])
+
+
 class NamingTests(unittest.TestCase):
     def test_movie_listing_name(self):
         core = bridge.BridgeCore({})

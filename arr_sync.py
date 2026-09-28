@@ -378,6 +378,7 @@ class AutoSync:
     SERIES_REFRESH_AGE_SECS = 3 * 86400
     SERIES_REFRESH_DELAY_SECS = 1.0
     CAPACITY_POLL_SECS = 30
+    SCHEDULE_WINDOW_SECS = 3 * 3600
     PLAN_SAMPLE_SIZE = 50
 
     def __init__(self, bridge):
@@ -541,6 +542,12 @@ class AutoSync:
         except ValueError:
             hh, mm = 3, 30
         if (now_dt.hour, now_dt.minute) < (hh, mm):
+            return False
+        # Only in a window after the scheduled time: enabling auto-sync (or a
+        # restart) in the afternoon must not start a "nightly" run while people
+        # watch -- a missed night simply waits for the next one.
+        scheduled = now_dt.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if (now_dt - scheduled).total_seconds() > self.SCHEDULE_WINDOW_SECS:
             return False
         today = now_dt.strftime("%Y-%m-%d")
         with self._state_lock:
