@@ -1,11 +1,11 @@
 {
   "name": "VOD To Plex",
-  "version": "2.5.2",
-  "description": "Dispatcharr plugin that bridges VOD movies into Plex via rclone HTTP mount with 302 redirect streaming, web dashboard, and selective activation.",
+  "version": "2.6.0",
+  "description": "Dispatcharr plugin that bridges VOD movies and series into Plex via rclone HTTP mount with 302 redirect streaming, selective activation, and a Radarr/Sonarr-aware nightly auto-sync of your enabled VOD groups.",
   "author": "knmplace",
   "license": "MIT",
-  "repo_url": "https://github.com/knmplace/dispatcharr-vod-plex-bridge-plugin",
-  "help_url": "https://github.com/knmplace/dispatcharr-vod-plex-bridge-plugin",
+  "repo_url": "https://github.com/stanbrug/dispatcharr-vod-plex-bridge-plugin",
+  "help_url": "https://github.com/stanbrug/dispatcharr-vod-plex-bridge-plugin",
   "min_dispatcharr_version": "0.24.0",
   "fields": [
     {
@@ -73,10 +73,45 @@
     },
     {
       "id": "plex_library_section",
-      "label": "Plex Library Section ID",
+      "label": "Plex Library Section ID (Movies)",
       "type": "number",
       "default": 7,
-      "help_text": "The Plex library section number for VOD movies (find via Plex API /library/sections)"
+      "help_text": "The Plex library section number for VOD movies (find via Plex API /library/sections). This may be your normal Movies library: add the rclone movies mount to it as an extra folder and set 'Plex path of the VOD movies mount' below."
+    },
+    {
+      "id": "plex_series_library_section",
+      "label": "Plex Library Section ID (Series, auto-sync)",
+      "type": "number",
+      "default": 0,
+      "help_text": "Plex TV library that auto-synced episodes go into (may be your normal TV library). Auto-sync creates a Series Settings category 'Auto-sync' pointing at this section. 0 = no series auto-sync."
+    },
+    {
+      "id": "plex_vod_movies_path",
+      "label": "Plex path of the VOD movies mount",
+      "type": "string",
+      "default": "",
+      "help_text": "The folder of the rclone /vod/ mount as PLEX sees it (e.g. /mnt/vod/movies). Required when the VOD folder shares a Plex library with Radarr/Decypharr: Plex removals then only ever touch media under this path, and scans are limited to it. Without it, a Plex item that also holds a non-VOD file is never modified."
+    },
+    {
+      "id": "plex_vod_series_path",
+      "label": "Plex path of the VOD series mount",
+      "type": "string",
+      "default": "",
+      "help_text": "The folder of the rclone /vod-series/ mount as PLEX sees it (e.g. /mnt/vod/series). Add <this path>/<category folder> (e.g. /mnt/vod/series/auto) to the Plex TV library. Same safety role as the movies path."
+    },
+    {
+      "id": "auto_sync_series_folder",
+      "label": "Auto-sync series folder name",
+      "type": "string",
+      "default": "auto",
+      "help_text": "Folder (under the series mount) auto-synced shows are written to. Fixed once the category exists."
+    },
+    {
+      "id": "plex_id_hints",
+      "label": "Add {tmdb-N} ids to names Plex sees",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Movie filenames and show folders get Plex's {tmdb-N} matching hint when Dispatcharr knows the TMDB id, so Plex matches the exact title and merges it with the same title from Radarr/Sonarr in a shared library. Applies to newly listed/created items."
     },
     {
       "id": "_section_strm",
@@ -121,6 +156,174 @@
       "help_text": "Caps how many simultaneous real Dispatcharr VOD connections a single movie or episode can hold. rclone's VFS mount can re-open a file's stream several times over the course of one watch (not just a millisecond read-ahead burst) — each open is a separate real provider connection unless capped here. Extra sessions beyond the limit are force-dropped, keeping the most recently active ones, both when a new stream is requested AND on an ongoing ~10s background sweep (so connections opened outside the normal redirect flow, e.g. rclone re-hitting an already-issued redirect URL directly, still get caught). Set too high (or 0 to disable) relative to what your IPTV provider actually allows and you WILL hammer their concurrent-connection limit — most providers cap total simultaneous streams per account (commonly 1-3), and every activated title sharing that account competes for the same pool, so this should generally match or sit under your provider's per-account connection limit, not just what feels reasonable for one show.",
       "min": 0,
       "max": 10
+    },
+    {
+      "id": "only_enabled_groups",
+      "label": "Only use enabled VOD groups",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Playback and activation only use provider streams from VOD groups (categories) you enabled on the M3U account in Dispatcharr, on active accounts, preferring the account with the highest VOD priority. Tip: turn off 'auto-enable new groups' on the M3U account so new provider groups don't switch themselves on."
+    },
+    {
+      "id": "reserve_streams_for_viewing",
+      "label": "Streams kept free for viewers",
+      "type": "number",
+      "default": 1,
+      "help_text": "Background work (auto-sync batches, scheduled audio checks, Plex's first analysis of freshly auto-synced titles) never uses these last provider streams, counted over all active profiles of an account (Dispatcharr's max streams). Auto-sync pauses while fewer than this+1 streams are free.",
+      "min": 0,
+      "max": 20
+    },
+    {
+      "id": "_section_auto_sync",
+      "label": "Auto-sync with Radarr / Sonarr",
+      "type": "info",
+      "description": "Every night: bring in all movies/series from your enabled Dispatcharr VOD groups that Radarr/Sonarr don't have a file for, and remove the VOD copy of anything Radarr/Sonarr has since downloaded. Try 'Auto-sync: dry run' first."
+    },
+    {
+      "id": "auto_sync_enabled",
+      "label": "Enable nightly auto-sync",
+      "type": "boolean",
+      "default": false
+    },
+    {
+      "id": "auto_sync_time",
+      "label": "Run at (HH:MM, container time)",
+      "type": "string",
+      "default": "03:30"
+    },
+    {
+      "id": "radarr_url",
+      "label": "Radarr URL",
+      "type": "string",
+      "default": "",
+      "help_text": "e.g. http://192.168.1.10:7878 (reachable from the Dispatcharr container)"
+    },
+    {
+      "id": "radarr_api_key",
+      "label": "Radarr API key",
+      "type": "string",
+      "default": "",
+      "input_type": "password"
+    },
+    {
+      "id": "sonarr_url",
+      "label": "Sonarr URL",
+      "type": "string",
+      "default": "",
+      "help_text": "e.g. http://192.168.1.10:8989"
+    },
+    {
+      "id": "sonarr_api_key",
+      "label": "Sonarr API key",
+      "type": "string",
+      "default": "",
+      "input_type": "password"
+    },
+    {
+      "id": "auto_sync_movies",
+      "label": "Sync movies",
+      "type": "boolean",
+      "default": true
+    },
+    {
+      "id": "auto_sync_series",
+      "label": "Sync series",
+      "type": "boolean",
+      "default": true
+    },
+    {
+      "id": "auto_sync_max_new_movies",
+      "label": "Max new movies per run",
+      "type": "number",
+      "default": 500,
+      "help_text": "Newest first. The rest follows on later nights.",
+      "min": 0
+    },
+    {
+      "id": "auto_sync_max_new_episodes",
+      "label": "Max new episodes per run",
+      "type": "number",
+      "default": 1000,
+      "min": 0
+    },
+    {
+      "id": "auto_sync_max_series_refresh",
+      "label": "Max series episode lists fetched per run",
+      "type": "number",
+      "default": 200,
+      "help_text": "Dispatcharr only knows a series' episodes after fetching them from the provider (one API call per series, not a stream). New series first, then running shows.",
+      "min": 0
+    },
+    {
+      "id": "auto_sync_batch_size",
+      "label": "Titles per batch",
+      "type": "number",
+      "default": 25,
+      "min": 1,
+      "max": 200
+    },
+    {
+      "id": "auto_sync_batch_delay_secs",
+      "label": "Pause between batches (seconds)",
+      "type": "number",
+      "default": 90,
+      "help_text": "Time for Plex to scan and analyze a batch before the next one lands.",
+      "min": 0
+    },
+    {
+      "id": "auto_sync_max_minutes",
+      "label": "Max run time (minutes)",
+      "type": "number",
+      "default": 240,
+      "min": 10
+    },
+    {
+      "id": "auto_sync_audio_probe",
+      "label": "Audio-check each new movie",
+      "type": "boolean",
+      "default": false,
+      "help_text": "Runs the ffprobe audio check per auto-synced movie. Costs one provider stream per title; off by default."
+    },
+    {
+      "id": "auto_sync_require_ids",
+      "label": "Skip movies without TMDB/IMDb id",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Without an id the Radarr check can't work and Plex matching is guesswork."
+    },
+    {
+      "id": "auto_sync_dedupe_manual",
+      "label": "Also remove manually activated titles Radarr/Sonarr have",
+      "type": "boolean",
+      "default": true
+    },
+    {
+      "id": "arr_count_missing_as_owned",
+      "label": "Treat 'in Radarr/Sonarr, no file yet' as owned",
+      "type": "boolean",
+      "default": false,
+      "help_text": "Off: the VOD copy stays until the real file exists (VOD is the fallback). On: anything Radarr/Sonarr is looking for is kept out of the VOD library."
+    },
+    {
+      "id": "auto_sync_allow_mass_removal",
+      "label": "Allow removing most auto-synced titles at once",
+      "type": "boolean",
+      "default": false,
+      "help_text": "Safety valve: if more than half of the auto-synced titles suddenly look 'group disabled' (e.g. a provider refresh in progress), their removal is held back unless this is on."
+    },
+    {
+      "id": "_section_security",
+      "label": "Security",
+      "type": "info",
+      "description": "The dashboard/API and the rclone endpoints are open to anyone who can reach the port unless an access token is set."
+    },
+    {
+      "id": "access_token",
+      "label": "Access token",
+      "type": "string",
+      "default": "",
+      "input_type": "password",
+      "help_text": "Letters/digits. Dashboard: open http://host:port/?token=<token> once. rclone: add --http-headers \"X-Bridge-Token,<token>\" to both mounts. Requests from inside the Dispatcharr container are always allowed."
     },
     {
       "id": "_section_maintenance",
@@ -222,6 +425,25 @@
       "button_label": "Status",
       "button_variant": "outline",
       "button_color": "blue"
+    },
+    {
+      "id": "auto_sync_dry_run",
+      "label": "Auto-sync: dry run",
+      "description": "Compare your enabled VOD groups with Radarr/Sonarr and report what a sync would add and remove, without changing anything. Results appear in the dashboard's Auto-sync tab.",
+      "button_label": "Dry run",
+      "button_variant": "outline",
+      "button_color": "blue"
+    },
+    {
+      "id": "auto_sync_now",
+      "label": "Auto-sync: run now",
+      "description": "Run the auto-sync now instead of waiting for the nightly schedule.",
+      "confirm": {
+        "message": "This adds and removes VOD titles in Plex based on your enabled groups and Radarr/Sonarr. Run it now?"
+      },
+      "button_label": "Sync now",
+      "button_variant": "filled",
+      "button_color": "green"
     }
   ]
 }

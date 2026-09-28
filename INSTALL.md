@@ -193,6 +193,74 @@ To confirm it's running, click **Status** — you should see:
 
 ---
 
+## Step 7 — Auto-sync with Radarr / Sonarr (optional)
+
+Instead of picking titles by hand, the plugin can mirror every movie and
+series from the VOD groups you enabled in Dispatcharr, minus whatever
+Radarr/Sonarr already have a file for — and remove the VOD copy once
+Radarr/Sonarr download the real file. The VOD folders can live in your
+**normal** Plex Movies/TV libraries.
+
+**7a. Choose your VOD groups in Dispatcharr.** On the M3U account, enable only
+the VOD groups you want and turn off *auto-enable new groups*, otherwise every
+new provider group switches itself on.
+
+**7b. Mount both endpoints** on the Plex host (same flags as Step 4; add the
+token header if you set an access token):
+
+```bash
+rclone mount :http: /mnt/vod/movies --http-url http://<dispatcharr-host>:8888/vod/ \
+  --http-headers "X-Bridge-Token,<token>" --allow-other --read-only \
+  --vfs-cache-mode off --dir-cache-time 30s --poll-interval 0
+rclone mount :http: /mnt/vod/series --http-url http://<dispatcharr-host>:8888/vod-series/ \
+  --http-headers "X-Bridge-Token,<token>" --allow-other --read-only \
+  --vfs-cache-mode off --dir-cache-time 30s --poll-interval 0
+```
+
+If Plex runs in Docker, bind-mount `/mnt/vod` into the Plex container with
+`:rslave` (or `rshared`) propagation, like any other FUSE mount.
+
+**7c. Add the folders to your existing Plex libraries:**
+
+| Plex library | Add folder |
+|---|---|
+| Movies | `/mnt/vod/movies` |
+| TV Shows | `/mnt/vod/series/auto` (the auto-sync category folder) |
+
+**7d. Plugin settings:**
+
+| Setting | Example |
+|---|---|
+| Plex Library Section ID (Movies) | your Movies library id |
+| Plex Library Section ID (Series, auto-sync) | your TV library id |
+| Plex path of the VOD movies mount | `/mnt/vod/movies` (as **Plex** sees it) |
+| Plex path of the VOD series mount | `/mnt/vod/series` |
+| Radarr/Sonarr URL + API key | `http://192.168.1.10:7878` … |
+| Streams kept free for viewers | `1` |
+| Enable nightly auto-sync / Run at | on / `03:30` |
+
+The two **Plex path** settings are what make a shared library safe: Plex
+merges the VOD copy and the Radarr/Sonarr copy of the same title into one item
+with two versions, and the plugin then only ever deletes the version under
+these paths — never the item, never the other file. Without them, an item
+that also holds a non-VOD file is left untouched.
+
+**7e. Try it:** click **Auto-sync: dry run** (Dispatcharr plugin page or the
+dashboard's *Auto-sync* tab) and review what would be added/removed before
+enabling the nightly run.
+
+---
+
+## 🔒 Access token (recommended)
+
+Set **Access token** in the plugin settings. The dashboard then opens once via
+`http://<host>:8888/?token=<token>` (stored in a cookie), rclone sends the
+`X-Bridge-Token` header shown above, and requests from inside the Dispatcharr
+container keep working without it. Without a token, anyone who can reach the
+port can use the dashboard API.
+
+---
+
 ## ✅ Next Steps
 
 - See [README.md](README.md#usage) for how to browse, activate, and manage your library from the dashboard.

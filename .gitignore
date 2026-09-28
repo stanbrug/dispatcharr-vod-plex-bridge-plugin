@@ -9,7 +9,6 @@ logs/
 .share.notes/
 *.code-workspace
 *.zip
-tests/
 pytest.ini
 .claude/
 .playwright-mcp/

@@ -11,7 +11,7 @@ import time
 from email.utils import formatdate
 from io import BytesIO
 from socketserver import ThreadingMixIn
-from urllib.parse import parse_qs, unquote
+from urllib.parse import parse_qs, quote, unquote
 from wsgiref.simple_server import WSGIServer, make_server
 
 logger = logging.getLogger("vod_plex_bridge.server")
@@ -135,6 +135,50 @@ def _request_path(environ):
     return unquote(raw)
 
 
+_TOKEN_COOKIE = "vodbridge_token"
+
+
+def _is_loopback(environ):
+    return environ.get("REMOTE_ADDR", "") in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
+
+def _presented_token(environ):
+    header = environ.get("HTTP_X_BRIDGE_TOKEN")
+    if header:
+        return header.strip()
+    auth = environ.get("HTTP_AUTHORIZATION", "")
+    if auth.lower().startswith("basic "):
+        # rclone's http backend can send user:pass; the password is the token.
+        import base64
+        try:
+            decoded = base64.b64decode(auth[6:].strip()).decode("utf-8", "replace")
+            return decoded.split(":", 1)[1] if ":" in decoded else decoded
+        except Exception:
+            return ""
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    from http.cookies import SimpleCookie
+    try:
+        cookie = SimpleCookie(environ.get("HTTP_COOKIE", ""))
+        if _TOKEN_COOKIE in cookie:
+            return unquote(cookie[_TOKEN_COOKIE].value)
+    except Exception:
+        pass
+    return ""
+
+
+def _authorized(environ, settings):
+    """Optional shared-secret protection (setting access_token). Without it
+    anyone who can reach the port can drive the dashboard API. Loopback is
+    always allowed: plugin.py's own liveness/shutdown/sync calls come from
+    inside the Dispatcharr container."""
+    expected = str(settings.get("access_token") or "").strip()
+    if not expected or _is_loopback(environ):
+        return True
+    import hmac
+    return hmac.compare_digest(_presented_token(environ).encode(), expected.encode())
+
+
 def _dispatch(environ, start_response, server, bridge, settings):
     method = environ["REQUEST_METHOD"]
     path = _request_path(environ)
@@ -145,6 +189,40 @@ def _dispatch(environ, start_response, server, bridge, settings):
 
     if path == "/api/ping" and method == "GET":
         return _json_response(start_response, {"plugin": "vod_plex_bridge"})
+
+    if not _authorized(environ, settings):
+        # Dashboard login: open /?token=<access token> once; the token is
+        # then kept in an HttpOnly cookie so the dashboard's own API calls
+        # carry it.
+        query_token = _parse_query(environ).get("token", [""])[0]
+        expected = str(settings.get("access_token") or "").strip()
+        if path in ("/", "/dashboard") and query_token:
+            import hmac
+            if hmac.compare_digest(query_token.encode(), expected.encode()):
+                start_response("302 Found", [
+                    ("Location", "/"),
+                    ("Set-Cookie", f"{_TOKEN_COOKIE}={quote(query_token, safe='')}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000"),
+                ])
+                return [b""]
+        return _text_response(
+            start_response, 401,
+            "Unauthorized. Open the dashboard as /?token=<access token>, or send the "
+            "X-Bridge-Token header (rclone: --http-headers \"X-Bridge-Token,<token>\")."
+        )
+
+    # --- Auto-sync (Radarr/Sonarr aware) ---
+    if path == "/api/auto-sync/status" and method == "GET":
+        return _json_response(start_response, bridge.auto_sync_status())
+
+    if path == "/api/auto-sync/run" and method == "POST":
+        body = _read_json_body(environ)
+        return _json_response(start_response, bridge.auto_sync_run(body))
+
+    if path == "/api/auto-sync/stop" and method == "POST":
+        return _json_response(start_response, bridge.auto_sync_stop())
+
+    if path == "/api/auto-sync/test" and method == "GET":
+        return _json_response(start_response, bridge.auto_sync_test_arr())
 
     if path == "/api/shutdown" and method == "POST":
         # Lets Stop Server work even when the click lands in a different
@@ -727,6 +805,7 @@ def _json_response(start_response, data, status=200):
 def _text_response(start_response, status, text):
     body = text.encode("utf-8")
     status_map = {200: "200 OK", 301: "301 Moved", 302: "302 Found",
+                  401: "401 Unauthorized", 403: "403 Forbidden",
                   404: "404 Not Found", 503: "503 Service Unavailable",
                   500: "500 Internal Server Error"}
     start_response(status_map.get(status, f"{status} Error"), [

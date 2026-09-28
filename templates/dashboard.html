@@ -442,6 +442,7 @@ select.search-input { flex: 0 0 auto; min-width: 140px; }
     <div class="tab" data-tab="reports" onclick="switchTab('reports')">Reports</div>
     <div class="tab" data-tab="needsAttention" onclick="switchTab('needsAttention')">Needs Attention <span class="badge" id="needsAttentionBadge" style="display:none">0</span></div>
     <div class="tab" data-tab="seriesSettings" onclick="switchTab('seriesSettings')">Series Settings</div>
+<div class="tab" data-tab="autoSync" onclick="switchTab('autoSync')">Auto-sync <span class="badge" id="autoSyncBadge" style="display:none">running</span></div>
   </div>
   <div class="tabs-stats">
     <span>Shows Activated: <span class="stat-val" id="hdrShowsActivated">-</span></span>
@@ -861,6 +862,39 @@ select.search-input { flex: 0 0 auto; min-width: 140px; }
     </div>
   </div>
 
+  <!-- Auto-sync Tab -->
+  <div class="tab-pane" id="pane-autoSync">
+    <div class="panel">
+      <div class="panel-header">
+        <span>Auto-sync with Radarr / Sonarr</span>
+        <div style="display:flex;gap:0.5rem;">
+          <button class="btn btn-outline btn-sm" onclick="testArrConnections()">Test Radarr/Sonarr</button>
+          <button class="btn btn-outline btn-sm" onclick="runAutoSync(true)">Dry run</button>
+          <button class="btn btn-primary btn-sm" onclick="runAutoSync(false)">Sync now</button>
+          <button class="btn btn-outline btn-sm" id="autoSyncStopBtn" onclick="stopAutoSync()" style="display:none;">Stop</button>
+          <button class="btn btn-outline btn-sm" onclick="loadAutoSync()">Refresh</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <p style="font-size:0.8rem;color:var(--text2);margin:0 0 0.75rem;">
+          Brings in every movie and series from the VOD groups you enabled in Dispatcharr that Radarr/Sonarr
+          don't have a file for, and removes the VOD copy of anything Radarr/Sonarr has since downloaded.
+          Settings live in the plugin's Dispatcharr settings panel (changes apply within a minute).
+        </p>
+        <div id="autoSyncStatus"><div class="loading"><span class="spinner"></span> Loading...</div></div>
+        <div id="autoSyncArrTest" style="font-size:0.8rem;margin-top:0.5rem;"></div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-header"><span>Last run</span></div>
+      <div class="panel-body" id="autoSyncLastRun"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-header"><span>Last dry run</span></div>
+      <div class="panel-body" id="autoSyncLastDryRun"></div>
+    </div>
+  </div>
+
 </div>
 
 <script>
@@ -893,6 +927,119 @@ function switchTab(tab) {
   if (tab === 'logs') { loadProxyLog(); startLogAutoRefresh(); }
   else stopLogAutoRefresh();
   if (tab === 'seriesSettings') loadSeriesCategories();
+  if (tab === 'autoSync') loadAutoSync();
+  else stopAutoSyncPolling();
+}
+
+// --- Auto-sync tab ---
+let autoSyncPollTimer = null;
+
+function stopAutoSyncPolling() {
+  if (autoSyncPollTimer) { clearInterval(autoSyncPollTimer); autoSyncPollTimer = null; }
+}
+
+function fmtTs(ts) {
+  return ts ? new Date(ts * 1000).toLocaleString() : '—';
+}
+
+function autoSyncSection(title, s) {
+  if (!s) return '';
+  if (s.skipped) {
+    return `<div style="margin-bottom:0.75rem;"><strong>${escapeHtml(title)}</strong>: skipped — ${escapeHtml(String(s.skipped))}</div>`;
+  }
+  const rows = [
+    ['Eligible (enabled groups)', s.eligible],
+    ['Already in Radarr/Sonarr (skipped)', s.skipped_owned],
+    ['To add', s.add_count],
+    ['Not added this run (cap)', s.add_capped],
+    ['Remove: now in Radarr/Sonarr', s.remove_owned_count],
+    ['Remove: group no longer enabled', s.remove_ineligible_count],
+  ];
+  if (s.remove_ineligible_held_back) rows.push(['Held back (safety valve)', s.remove_ineligible_held_back]);
+  if (s.skipped_no_ids) rows.push(['Skipped: no TMDB/IMDb id', s.skipped_no_ids]);
+  if (s.skipped_unknown) rows.push(['Skipped: Sonarr state unknown', s.skipped_unknown]);
+  if (s.skipped_cooldown) rows.push(['Skipped: failed recently (retry in 7 days)', s.skipped_cooldown]);
+  if (s.episode_lists_fetched !== undefined) rows.push(['Episode lists fetched from provider', `${s.episode_lists_fetched} (${s.episode_lists_pending} still to do)`]);
+  if (s.added !== undefined) rows.push(['Added', s.added]);
+  if (s.removed !== undefined) rows.push(['Removed', s.removed]);
+  if (s.failed) rows.push(['Failed to add', s.failed]);
+  if (s.stopped_early) rows.push(['Stopped early', s.stopped_early]);
+  const table = rows.filter(r => r[1] !== undefined && r[1] !== null)
+    .map(r => `<tr><td style="padding:0.2rem 0.6rem 0.2rem 0;color:var(--text2);">${escapeHtml(r[0])}</td><td>${escapeHtml(String(r[1]))}</td></tr>`).join('');
+  const list = (label, items, total) => (items && items.length)
+    ? `<details style="margin-top:0.3rem;"><summary style="cursor:pointer;font-size:0.8rem;">${escapeHtml(label)} (${total})</summary><div style="font-size:0.78rem;color:var(--text2);padding:0.3rem 0 0 0.8rem;">${items.map(escapeHtml).join('<br>')}${total > items.length ? '<br>…' : ''}</div></details>`
+    : '';
+  return `<div style="margin-bottom:0.9rem;"><strong>${escapeHtml(title)}</strong>
+    <table style="font-size:0.82rem;margin-top:0.3rem;">${table}</table>
+    ${list('To add', s.add, s.add_count)}
+    ${list('Remove (in Radarr/Sonarr)', s.remove_owned, s.remove_owned_count)}
+    ${list('Remove (group disabled)', s.remove_ineligible, s.remove_ineligible_count)}</div>`;
+}
+
+function autoSyncResult(r) {
+  if (!r) return '<div style="font-size:0.85rem;color:var(--text2);">Nothing yet.</div>';
+  if (r.status === 'error') {
+    return `<div style="color:var(--red);font-size:0.85rem;">Failed: ${escapeHtml(r.message || '')}</div>`;
+  }
+  const head = `<div style="font-size:0.78rem;color:var(--text2);margin-bottom:0.6rem;">${escapeHtml(r.trigger || '')} · ${fmtTs(r.started_at)} → ${fmtTs(r.finished_at)}${r.status === 'stopped' ? ' · stopped' : ''}</div>`;
+  return head + autoSyncSection('Movies', r.movies) + autoSyncSection('Episodes', r.episodes);
+}
+
+async function loadAutoSync() {
+  let s;
+  try { s = await api('/api/auto-sync/status'); } catch (e) {
+    document.getElementById('autoSyncStatus').innerHTML = `<div style="color:var(--red);">${escapeHtml(String(e))}</div>`;
+    return;
+  }
+  const running = !!s.running;
+  document.getElementById('autoSyncBadge').style.display = running ? '' : 'none';
+  document.getElementById('autoSyncStopBtn').style.display = running ? '' : 'none';
+  const warn = (!s.plex_vod_movies_path || !s.plex_vod_series_path)
+    ? `<div style="color:var(--yellow, #d9a400);font-size:0.8rem;margin-top:0.4rem;">Plex path of the VOD ${!s.plex_vod_movies_path ? 'movies' : 'series'} mount is not set. Set both when the VOD folders share a Plex library with Radarr/Sonarr.</div>`
+    : '';
+  const rows = [
+    ['Nightly run', s.enabled ? `on, at ${escapeHtml(s.schedule || '')}` : 'off'],
+    ['Last scheduled run', escapeHtml(s.last_run_date || '—')],
+    ['State', running ? escapeHtml((s.progress && s.progress.state) || 'running') : 'idle'],
+    ['Radarr / Sonarr', `${s.radarr_configured ? 'configured' : 'not configured'} / ${s.sonarr_configured ? 'configured' : 'not configured'}`],
+    ['Auto-synced now', `${s.auto_movies} movies, ${s.auto_episodes} episodes`],
+    ['Streams kept free for viewers', escapeHtml(String(s.reserve_streams_for_viewing))],
+    ['Provider capacity for background work', s.capacity_available ? 'available' : 'busy (viewers)'],
+    ['Retry cooldown', `${s.cooldown_movies} movies, ${s.cooldown_episodes} episodes`],
+  ];
+  document.getElementById('autoSyncStatus').innerHTML =
+    `<table style="font-size:0.82rem;">${rows.map(r => `<tr><td style="padding:0.2rem 0.8rem 0.2rem 0;color:var(--text2);">${r[0]}</td><td>${r[1]}</td></tr>`).join('')}</table>${warn}`;
+  document.getElementById('autoSyncLastRun').innerHTML = autoSyncResult(s.last_result);
+  document.getElementById('autoSyncLastDryRun').innerHTML = autoSyncResult(s.last_dry_run);
+
+  if (running && !autoSyncPollTimer) autoSyncPollTimer = setInterval(loadAutoSync, 5000);
+  if (!running) stopAutoSyncPolling();
+}
+
+async function runAutoSync(dryRun) {
+  if (!dryRun && !confirm('Run the auto-sync now? This adds and removes VOD titles in Plex.')) return;
+  const r = await api('/api/auto-sync/run', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({dry_run: dryRun}),
+  });
+  if (r.status === 'started') showToast(dryRun ? 'Dry run started' : 'Auto-sync started', '', 'success');
+  else showToast('Auto-sync', r.message || r.status, 'error');
+  loadAutoSync();
+}
+
+async function stopAutoSync() {
+  const r = await api('/api/auto-sync/stop', {method: 'POST'});
+  showToast('Auto-sync', r.message || '', 'success');
+  loadAutoSync();
+}
+
+async function testArrConnections() {
+  const el = document.getElementById('autoSyncArrTest');
+  el.innerHTML = '<span class="spinner"></span> Testing...';
+  const r = await api('/api/auto-sync/test');
+  const line = (name, x) => x
+    ? `${name}: ${x.ok ? `<span style="color:var(--green, #3fb950);">OK</span> ${escapeHtml(x.app || '')} ${escapeHtml(x.version || '')}` : `<span style="color:var(--red);">${escapeHtml(x.message || 'failed')}</span>`}`
+    : '';
+  el.innerHTML = [line('Radarr', r.radarr), line('Sonarr', r.sonarr)].filter(Boolean).join('<br>') || escapeHtml(r.message || '');
 }
 
 function switchMode(mode) {

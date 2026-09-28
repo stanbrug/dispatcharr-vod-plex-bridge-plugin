@@ -185,6 +185,8 @@ class Plugin:
             "stop_server": self._stop_server,
             "server_status": self._server_status,
             "open_dashboard": self._open_dashboard,
+            "auto_sync_now": lambda s, l: self._auto_sync(s, l, dry_run=False),
+            "auto_sync_dry_run": lambda s, l: self._auto_sync(s, l, dry_run=True),
         }
 
         handler = handlers.get(action)
@@ -380,6 +382,34 @@ class Plugin:
                             f"A container restart will clear it.",
             }
         return {"status": "ok", "message": "✗ Server is not running — click Start Server to launch."}
+
+    def _auto_sync(self, settings, log, dry_run):
+        """Start an auto-sync run on the running server. Goes over loopback
+        HTTP for the same reason Stop Server does: the server (and its
+        BridgeCore) may live in a different worker process than this click."""
+        port = int(settings.get("http_port", 8888))
+        if not _is_our_server(port):
+            return {"status": "error", "message": "Server is not running — click Start Server first."}
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/auto-sync/run",
+                data=json.dumps({"dry_run": dry_run}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            log.error(f"VOD To Plex: auto-sync start failed: {e}")
+            return {"status": "error", "message": f"Could not reach the server: {e}"}
+
+        if result.get("status") == "busy":
+            return {"status": "ok", "message": "An auto-sync is already running — see the dashboard's Auto-sync tab."}
+        if result.get("status") != "started":
+            return {"status": "error", "message": result.get("message", "Auto-sync did not start")}
+        what = "Dry run" if dry_run else "Auto-sync"
+        return {"status": "ok", "message": f"{what} started — follow it in the dashboard's Auto-sync tab."}
 
     def _open_dashboard(self, settings, log):
         port = int(settings.get("http_port", 8888))

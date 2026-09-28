@@ -9,6 +9,13 @@
 A <a href="https://github.com/Dispatcharr/Dispatcharr">Dispatcharr</a> plugin that bridges VOD movies and series into Plex via rclone HTTP mount with 302 redirect streaming.
 </p>
 
+> **Fork of [knmplace/dispatcharr-vod-plex-bridge-plugin](https://github.com/knmplace/dispatcharr-vod-plex-bridge-plugin)**
+> adding a Radarr/Sonarr-aware nightly auto-sync of your enabled VOD groups,
+> safe removals in Plex libraries shared with Radarr/Sonarr, and provider
+> max-streams handling across all account profiles. See
+> [RELEASE_NOTES_2.6.0.md](RELEASE_NOTES_2.6.0.md) and
+> [INSTALL.md → Step 7](INSTALL.md#step-7--auto-sync-with-radarr--sonarr-optional).
+
 ---
 
 ## 🚀 How It Works
@@ -46,6 +53,14 @@ Plex → rclone HTTP mount → Plugin HTTP server → 302 redirect → Dispatcha
 - Real-time Plex delete on deactivation — no waiting on a scan
 - Automatic library scan trigger after activation
 - Plex Now Playing panel — see active sessions from the dashboard
+
+**🔁 Auto-sync with Radarr / Sonarr**
+- Nightly (or on demand) mirror of every movie and series from the VOD groups you enabled in Dispatcharr
+- Skips anything Radarr/Sonarr already have a file for; removes the VOD copy once they download it (per episode for series)
+- VOD folders can share your normal Plex libraries: removals only ever touch the VOD version of an item, `{tmdb-N}` hints make Plex merge instead of duplicate
+- Respects provider max streams across all account profiles, keeps streams free for viewers, pauses while people watch
+- Dry run, capped batches, retry cooldown, and a safety valve against mass removals
+- Setup: [INSTALL.md → Step 7](INSTALL.md#step-7--auto-sync-with-radarr--sonarr-optional)
 
 **🩺 Health & Reliability**
 - Per-provider health dashboard with manual refresh
@@ -118,6 +133,7 @@ vod_plex_bridge/
 ├── plugin.py           # Plugin lifecycle — auto-start, start/stop, status
 ├── server.py           # WSGI HTTP server (stdlib wsgiref, threaded)
 ├── bridge.py           # Django ORM queries, 302 URL builder, STRM/NFO gen, Plex API
+├── arr_sync.py         # Radarr/Sonarr clients, sync planning, nightly auto-sync driver
 ├── logo.png             # Plugin logo
 └── templates/
     └── dashboard.html  # Web dashboard (Browse, Series, Health tabs)
