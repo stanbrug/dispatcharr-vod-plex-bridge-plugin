@@ -134,6 +134,27 @@ def norm_title(title):
     return re.sub(r"[^0-9a-z]", "", title.lower().replace("&", "and"))
 
 
+class EpisodeCoverage(set):
+    """The (season, episode) pairs the VOD must not provide for one show.
+
+    Holds the episodes Sonarr has a file for. When Sonarr also has files for
+    the show (so Plex shows Sonarr's version of it), a pair Sonarr doesn't
+    know at all counts as covered too: the provider numbers that show
+    differently (TMDB vs TVDB -- Money Heist as 5 parts vs 3 seasons, Dutch
+    shows as 11 seasons vs years), and adding it would put a second copy
+    under another number next to Sonarr's. Only episodes Sonarr knows but
+    lacks a file for are filled in."""
+
+    def __init__(self, owned, known=None):
+        super().__init__(owned)
+        self.known = known
+
+    def __contains__(self, key):
+        if set.__contains__(self, key):
+            return True
+        return self.known is not None and key not in self.known
+
+
 class SonarrIndex:
     """Which episodes Sonarr already provides.
 
@@ -220,17 +241,19 @@ class SonarrIndex:
             return self._episodes[sonarr_series_id]
 
         episodes = self.client.get("episode", params={"seriesId": sonarr_series_id})
-        owned = set()
+        owned, known, has_files = set(), set(), False
         for ep in episodes or []:
-            if not (ep.get("hasFile") or self.count_missing_as_owned):
-                continue
             season = ep.get("seasonNumber")
             number = ep.get("episodeNumber")
             if season is None or number is None:
                 continue
-            owned.add((int(season), int(number)))
-        self._episodes[sonarr_series_id] = owned
-        return owned
+            known.add((int(season), int(number)))
+            has_files = has_files or bool(ep.get("hasFile"))
+            if ep.get("hasFile") or self.count_missing_as_owned:
+                owned.add((int(season), int(number)))
+        coverage = EpisodeCoverage(owned, known if has_files else None)
+        self._episodes[sonarr_series_id] = coverage
+        return coverage
 
 
 def plan_movies(eligible, activated, radarr, failed_until, now, max_new, require_ids=True,

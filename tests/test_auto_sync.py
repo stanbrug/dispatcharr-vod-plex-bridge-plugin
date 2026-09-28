@@ -93,6 +93,23 @@ class SonarrIndexTests(unittest.TestCase):
         idx.owned_episodes(1)
         self.assertEqual(len(client.calls), 1)
 
+    def test_unknown_numbering_counts_as_covered(self):
+        # Sonarr has files for series 1 (S01E01-E03 known): a VOD "S04E01"
+        # (provider numbers the show differently) must not be added, the
+        # known-but-missing S01E03 may be.
+        idx, _ = self.make()
+        cov = idx.owned_episodes(1)
+        self.assertIn((1, 1), cov)
+        self.assertNotIn((1, 3), cov)
+        self.assertIn((4, 1), cov)
+        plan = plan_episodes(
+            {"a": {"series_id": "s", "season": 1, "episode": 3, "added": 1},
+             "b": {"series_id": "s", "season": 4, "episode": 1, "added": 1}},
+            {"c": {"source": "auto", "series_id": "s", "season_number": 5, "episode_number": 2}},
+            lambda sid: cov, {}, 0, max_new=10)
+        self.assertEqual(plan["add"], ["a"])
+        self.assertEqual(plan["remove_owned"], ["c"])
+
     def test_no_files_skips_fetch(self):
         idx, client = self.make()
         self.assertEqual(idx.owned_episodes(2), set())
