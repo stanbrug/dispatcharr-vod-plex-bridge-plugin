@@ -5849,6 +5849,22 @@ class BridgeCore:
         "CZ", "SK", "HU",
     })
 
+    # Audio/language tags providers put next to (or instead of) a country
+    # code: "(ENG)", "(MULTI)", "(NL AUDIO)", "(NL GESPROKEN)", "(NL-BE)".
+    _LANGUAGE_TAGS = frozenset({"ENG", "EN", "MULTI", "MUTLI", "MULTISUB", "VOSTFR", "DUB", "SUB", "SUBS",
+                                "DUBBED", "VLAAMS"})
+    _LANGUAGE_TAG_WORDS = frozenset({"AUDIO", "GESPROKEN", "SUB", "SUBS", "DUB", "DUBBED", "ONDERTITELD"})
+
+    def _is_language_tag(self, tag):
+        """True for a provider country/language tag such as "NL", "TR",
+        "MULTI" or "NL AUDIO"; False for real parentheticals ("deel 1",
+        "Sneeuwengelen")."""
+        words = [w for w in re.split(r"[\s\-/]+", tag.strip().upper()) if w]
+        if not words or len(words) > 3:
+            return False
+        codes = self._COUNTRY_SUFFIX_CODES | self._LANGUAGE_TAGS
+        return words[0] in codes and all(w in codes or w in self._LANGUAGE_TAG_WORDS for w in words[1:])
+
     def _clean_title(self, name):
         # (code note: from PR #2 -- guard tightened after live data showed a
         # false-positive: "2LDK - 2003" is a real film title (2LDK, 2003),
@@ -5893,11 +5909,19 @@ class BridgeCore:
         # because our side kept "The Hunt (2026)" while Plex's
         # grandparentTitle was just "The Hunt"). Stripping the country
         # suffix first makes the year trailing again so it gets caught too.
-        suffix_match = re.search(r"\s*\(([A-Z]{2,3})\)\s*$", name)
-        if suffix_match and suffix_match.group(1) in self._COUNTRY_SUFFIX_CODES:
-            name = name[:suffix_match.start()]
-        name = re.sub(r"\s*\(\d{4}\)\s*$", "", name)
-        name = re.sub(r"\s*-\s*\d{4}\s*$", "", name)
+        # Providers stack trailing tags in any order -- "Ezra (NL) (2023)",
+        # "Into the Night (MULTI) (2020)", "Bledders (NL AUDIO)" -- so peel
+        # them off one at a time until none is left.
+        while True:
+            before = name
+            suffix_match = re.search(r"\s*\(([^()]{2,20})\)\s*$", name)
+            if suffix_match and self._is_language_tag(suffix_match.group(1)):
+                name = name[:suffix_match.start()]
+            name = re.sub(r"\s*\(\d{4}\)\s*$", "", name)
+            name = re.sub(r"\s*-\s*\d{4}\s*$", "", name)
+            name = re.sub(r"\s*\(\s*$", "", name)  # "Escort Boys ( (MULTI)"
+            if name == before:
+                break
         name = re.sub(r'[<>:"/\\|?*]', "", name)
         return name.strip()
 

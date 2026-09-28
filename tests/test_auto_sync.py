@@ -277,6 +277,29 @@ class NamingTests(unittest.TestCase):
         self.assertEqual(core._clean_title("Heat (1995) {tmdb-949}"), "Heat")
         self.assertEqual(core._clean_title("Our Girl (GB)"), "Our Girl")
 
+    def test_clean_title_strips_stacked_language_tags(self):
+        core = bridge.BridgeCore({})
+        cases = {
+            "Ezra (NL) (2023)": "Ezra",
+            "De Bauers - 20 Jaar Later (NL) (2003)": "De Bauers - 20 Jaar Later",
+            "Into the Night (MULTI) (2020)": "Into the Night",
+            "Om Nom Stories (MULTi) (2011)": "Om Nom Stories",
+            "WWE NXT 22-09-26 (ENG)": "WWE NXT 22-09-26",
+            "Bledders (NL AUDIO)": "Bledders",
+            "20 Jaar Het Eiland (NL-BE)": "20 Jaar Het Eiland",
+            "Enola Holmes (MUTLI) (2020)": "Enola Holmes",
+            "Escort Boys ( (MULTI) (2014)": "Escort Boys",
+            "X-Men 2000 (TR) (2000)": "X-Men 2000",
+            # real parentheticals stay
+            "Holland Zingt Hazes 2025 (deel 1) (NL)": "Holland Zingt Hazes 2025 (deel 1)",
+            "Snöänglar (Sneeuwengelen) (NL) (2021)": "Snöänglar (Sneeuwengelen)",
+            "Crazy, Stupid, Love. - 2011 (2011)": "Crazy, Stupid, Love.",
+        }
+        for raw, expected in cases.items():
+            self.assertEqual(core._clean_title(raw), expected, raw)
+        self.assertEqual(core._movie_listing_name(9537, "Ezra (NL) (2023)", 2023, "1049948"),
+                         "Ezra (2023) {tmdb-1049948} [9537].mkv")
+
     def test_vod_file_id(self):
         self.assertEqual(bridge._vod_file_id("/x/Show - S01E02 - Pilot [987].mkv"), "987")
         self.assertEqual(bridge._vod_file_id("/x/123.mp4"), "123")
