@@ -212,6 +212,9 @@ class BridgeCore:
         self._bitrate_lookup_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=self.BITRATE_LOOKUP_POOL_WORKERS, thread_name_prefix="bitrate-lookup"
         )
+        # Shared Plex show list per section (see _plex_section_shows).
+        self._plex_shows_cache = {}
+        self._plex_shows_lock = threading.Lock()
         self._languages = {}
         self._data_dir = "/data/vod-plex-bridge"
         self._lang_detect_running = False
@@ -3439,17 +3442,38 @@ class BridgeCore:
         key = (str(section), str(plex_type))
         if cache is not None and key in cache:
             return cache[key]
-        resp = requests.get(
-            f"{plex_url}/library/sections/{section}/all",
-            params={"X-Plex-Token": plex_token, "type": str(plex_type)},
-            headers={"Accept": "application/json"},
-            timeout=90,
-        )
-        if resp.status_code != 200:
-            logger.warning(f"Plex library query failed for section {section}: {resp.status_code}")
-            return None
-        items = resp.json().get("MediaContainer", {}).get("Metadata", []) or []
-        if cache is not None:
+        # Shared across threads too: each just-activated episode runs its own
+        # size-reconcile thread, and when every one of them downloaded the
+        # whole episode list of a 27k-episode section, a 500-episode nightly
+        # batch took Plex down (14 GB RSS, 503s; confirmed live 2026-09-29).
+        # Single flight, reused for PLEX_SHOWS_CACHE_SECS, failures back off.
+        with self._plex_shows_lock:
+            now = time.time()
+            shared = self._plex_shows_cache.get(key)
+            if shared:
+                fetched_at, items = shared
+                ttl = self.PLEX_SHOWS_CACHE_SECS if items is not None else self.PLEX_SHOWS_FAIL_SECS
+                if now - fetched_at < ttl:
+                    if cache is not None and items is not None:
+                        cache[key] = items
+                    return items
+            items = None
+            try:
+                resp = requests.get(
+                    f"{plex_url}/library/sections/{section}/all",
+                    params={"X-Plex-Token": plex_token, "type": str(plex_type)},
+                    headers={"Accept": "application/json"},
+                    timeout=90,
+                )
+                if resp.status_code == 200:
+                    items = resp.json().get("MediaContainer", {}).get("Metadata", []) or []
+                else:
+                    logger.warning(f"Plex library query failed for section {section}: {resp.status_code} "
+                                   f"(pausing section lookups for {self.PLEX_SHOWS_FAIL_SECS}s)")
+            except requests.RequestException as e:
+                logger.warning(f"Plex library query failed for section {section}: {e}")
+            self._plex_shows_cache[key] = (time.time(), items)
+        if cache is not None and items is not None:
             cache[key] = items
         return items
 
@@ -4043,6 +4067,47 @@ class BridgeCore:
             bitrate = None
         return bitrate if bitrate and bitrate > 0 else None
 
+    # A fetched show list is reused this long; a failed fetch (503 while
+    # Plex is busy) blocks retries for PLEX_SHOWS_FAIL_SECS.
+    PLEX_SHOWS_CACHE_SECS = 120
+    PLEX_SHOWS_FAIL_SECS = 300
+
+    def _plex_section_shows(self, plex_url, plex_token, section):
+        """All shows of one Plex section, fetched once and shared.
+
+        Every just-activated placeholder series runs its own fast-path
+        reconcile thread, all on the same delays. When each downloaded the
+        whole section itself, a nightly batch of a few hundred series sent
+        Plex >1000 concurrent requests and it answered 503 for hours
+        (confirmed live 2026-09-29). Single flight under a lock, cached for
+        PLEX_SHOWS_CACHE_SECS, and a failure is remembered so a busy Plex
+        isn't hammered further. Returns None when unavailable."""
+        with self._plex_shows_lock:
+            now = time.time()
+            cached = self._plex_shows_cache.get(section)
+            if cached:
+                fetched_at, items = cached
+                ttl = self.PLEX_SHOWS_CACHE_SECS if items is not None else self.PLEX_SHOWS_FAIL_SECS
+                if now - fetched_at < ttl:
+                    return items
+            items = None
+            try:
+                resp = requests.get(
+                    f"{plex_url}/library/sections/{section}/all",
+                    params={"X-Plex-Token": plex_token, "type": "2"},
+                    headers={"Accept": "application/json"},
+                    timeout=30,
+                )
+                if resp.status_code == 200:
+                    items = resp.json().get("MediaContainer", {}).get("Metadata", []) or []
+                else:
+                    logger.warning(f"Plex library query failed for section {section}: {resp.status_code} "
+                                   f"(pausing show lookups for {self.PLEX_SHOWS_FAIL_SECS}s)")
+            except Exception as e:
+                logger.warning(f"Plex library query failed for section {section}: {e}")
+            self._plex_shows_cache[section] = (time.time(), items)
+            return items
+
     def _fetch_plex_series_tmdb_ids(self, series_ids=None):
         """Mirrors _fetch_plex_episode_sizes(): once Plex has scanned a
         series folder (even one anchored only by our placeholder uniqueid),
@@ -4075,17 +4140,9 @@ class BridgeCore:
         resolved = {}
         for section, pairs in by_section.items():
             try:
-                resp = requests.get(
-                    f"{plex_url}/library/sections/{section}/all",
-                    params={"X-Plex-Token": plex_token, "type": "2"},
-                    headers={"Accept": "application/json"},
-                    timeout=15,
-                )
-                if resp.status_code != 200:
-                    logger.warning(f"Plex library query failed for section {section}: {resp.status_code}")
+                items = self._plex_section_shows(plex_url, plex_token, section)
+                if items is None:
                     continue
-
-                items = resp.json().get("MediaContainer", {}).get("Metadata", [])
                 # series_clean_title is filesystem-sanitized (e.g. colons
                 # stripped for STRM folder naming), so sanitize Plex's raw
                 # title the same way here -- same fix as
@@ -4322,6 +4379,10 @@ class BridgeCore:
         ]
         if not missing:
             return
+        # One Plex lookup for the whole sweep; only series Plex already
+        # matched get the per-series rewrite below.
+        found = self._fetch_plex_series_tmdb_ids(missing)
+        missing = [sid for sid in missing if sid in found]
         resolved = 0
         for sid in missing:
             try:
